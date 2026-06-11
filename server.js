@@ -141,13 +141,14 @@ app.get('/api/stats', handler(async (req, res) => {
     dbGet('SELECT COALESCE(SUM(t.elevation_m),0) AS total FROM trip_records r JOIN trails t ON t.id=r.trail_id'),
     dbGet('SELECT COUNT(*) AS n FROM favorites'),
   ])
+  // pg 的 COUNT/SUM 返回字符串，统一转为数字以保持 API 契约
   res.json({
     success: true,
     data: {
-      totalTrips: trips.n,
-      totalKm:    Math.round(km.total * 10) / 10,
-      totalElev:  elev.total,
-      favCount:   favs.n,
+      totalTrips: Number(trips.n),
+      totalKm:    Math.round(Number(km.total) * 10) / 10,
+      totalElev:  Number(elev.total),
+      favCount:   Number(favs.n),
     }
   })
 }))
