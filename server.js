@@ -176,6 +176,20 @@ function fetchJson(url, timeout = 15000) {
   })
 }
 
+// open-meteo 偶发 TLS 断连/超时，重试若干次提升稳定性
+async function fetchJsonWithRetry(url, retries = 3) {
+  let lastErr
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fetchJson(url)
+    } catch (e) {
+      lastErr = e
+      if (i < retries - 1) await new Promise(r => setTimeout(r, 400 * (i + 1)))
+    }
+  }
+  throw lastErr
+}
+
 // GET /api/weather?lat=39.967&lng=115.477
 app.get('/api/weather', handler(async (req, res) => {
   const lat = req.query.lat || '39.967'
@@ -185,7 +199,7 @@ app.get('/api/weather', handler(async (req, res) => {
     + '&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weathercode'
     + '&daily=weathercode,temperature_2m_max,temperature_2m_min'
     + '&forecast_days=3&timezone=Asia%2FShanghai'
-  const data = await fetchJson(url)
+  const data = await fetchJsonWithRetry(url)
   res.json({ success: true, data })
 }))
 
