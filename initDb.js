@@ -1,34 +1,18 @@
 /**
- * initDb.js — 初始化 SQLite 数据库，建表并写入种子数据
+ * initDb.js — 初始化 PostgreSQL 数据库，建表并写入种子数据
  * 使用: node initDb.js
+ * 幂等：表用 CREATE TABLE IF NOT EXISTS；种子仅在 trails 表为空时写入，
+ *       因此每次容器启动都可安全运行，已有数据不会被覆盖。
  */
-const sqlite3 = require('sqlite3').verbose()
-const path = require('path')
+const { pool, toPg } = require('./db')
 
-const DB_PATH = path.join(__dirname, 'trailgo.db')
-const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) { console.error('打开数据库失败:', err.message); process.exit(1) }
-  console.log('📂 数据库已连接:', DB_PATH)
-})
-
-// 辅助：将 db.run 包装成 Promise
-function run(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) reject(err); else resolve(this)
-    })
-  })
-}
+const run = (sql, params = []) => pool.query(toPg(sql), params)
 
 async function init() {
-  // ── 开启外键 & WAL ──────────────────────────────────────────────────────────
-  await run('PRAGMA foreign_keys = ON')
-  await run('PRAGMA journal_mode = WAL')
-
   // ── 建表 ────────────────────────────────────────────────────────────────────
   await run(`
     CREATE TABLE IF NOT EXISTS trails (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      id          INTEGER PRIMARY KEY,
       name        TEXT    NOT NULL,
       region      TEXT    NOT NULL,
       difficulty  TEXT    NOT NULL CHECK(difficulty IN ('入门','进阶','高难度')),
@@ -40,13 +24,13 @@ async function init() {
       tags        TEXT    NOT NULL DEFAULT '[]',
       summary     TEXT,
       cover_emoji TEXT    DEFAULT '⛰️',
-      created_at  TEXT    DEFAULT (datetime('now','localtime'))
+      created_at  TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS')
     )
   `)
 
   await run(`
     CREATE TABLE IF NOT EXISTS trail_guides (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      id          SERIAL  PRIMARY KEY,
       trail_id    INTEGER NOT NULL REFERENCES trails(id) ON DELETE CASCADE,
       step_no     INTEGER NOT NULL,
       title       TEXT    NOT NULL,
@@ -56,7 +40,7 @@ async function init() {
 
   await run(`
     CREATE TABLE IF NOT EXISTS trail_tips (
-      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      id       SERIAL  PRIMARY KEY,
       trail_id INTEGER NOT NULL REFERENCES trails(id) ON DELETE CASCADE,
       type     TEXT    NOT NULL CHECK(type IN ('good','warn')),
       content  TEXT    NOT NULL
@@ -65,23 +49,30 @@ async function init() {
 
   await run(`
     CREATE TABLE IF NOT EXISTS favorites (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      id         SERIAL  PRIMARY KEY,
       trail_id   INTEGER NOT NULL REFERENCES trails(id) ON DELETE CASCADE,
-      created_at TEXT    DEFAULT (datetime('now','localtime')),
+      created_at TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS'),
       UNIQUE(trail_id)
     )
   `)
 
   await run(`
     CREATE TABLE IF NOT EXISTS trip_records (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      id           SERIAL  PRIMARY KEY,
       trail_id     INTEGER NOT NULL REFERENCES trails(id) ON DELETE CASCADE,
       date         TEXT    NOT NULL,
       duration_min INTEGER,
       note         TEXT,
-      created_at   TEXT    DEFAULT (datetime('now','localtime'))
+      created_at   TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS')
     )
   `)
+
+  // ── 幂等保护：已有路线数据则跳过种子，保留用户的收藏/记录 ──────────────────────
+  const { rows } = await run('SELECT COUNT(*)::int AS n FROM trails')
+  if (rows[0].n > 0) {
+    console.log(`ℹ️  数据库已存在数据（路线 ${rows[0].n} 条），跳过种子写入`)
+    return
+  }
 
   // ── 种子：路线 ──────────────────────────────────────────────────────────────
   const trails = [
@@ -95,9 +86,10 @@ async function init() {
 
   for (const t of trails) {
     await run(
-      `INSERT OR IGNORE INTO trails
+      `INSERT INTO trails
          (id,name,region,difficulty,distance_km,duration_h,elevation_m,lat,lng,tags,summary,cover_emoji)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT (id) DO NOTHING`,
       t
     )
   }
@@ -139,7 +131,7 @@ async function init() {
 
   for (const [tid, step, title, desc] of guides) {
     await run(
-      `INSERT OR IGNORE INTO trail_guides (trail_id,step_no,title,description) VALUES (?,?,?,?)`,
+      `INSERT INTO trail_guides (trail_id,step_no,title,description) VALUES (?,?,?,?)`,
       [tid, step, title, desc]
     )
   }
@@ -177,18 +169,19 @@ async function init() {
 
   for (const [tid, type, content] of tips) {
     await run(
-      `INSERT OR IGNORE INTO trail_tips (trail_id,type,content) VALUES (?,?,?)`,
+      `INSERT INTO trail_tips (trail_id,type,content) VALUES (?,?,?)`,
       [tid, type, content]
     )
   }
 
   console.log('✅ 数据库初始化完成，共写入：')
   console.log('   路线 6 条 | 攻略步骤 24 条 | 提示 21 条')
-  db.close()
 }
 
-init().catch((err) => {
-  console.error('初始化失败:', err)
-  db.close()
-  process.exit(1)
-})
+init()
+  .then(() => pool.end())
+  .catch((err) => {
+    console.error('初始化失败:', err)
+    pool.end()
+    process.exit(1)
+  })

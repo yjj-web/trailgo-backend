@@ -1,37 +1,17 @@
 /**
  * server.js — TrailGo 后端服务
- * Express + sqlite3 (异步回调风格，Promise 封装)
- * 支持本地运行和腾讯云 Serverless SCF
+ * Express + PostgreSQL (node-postgres)
  */
 const express = require('express')
 const cors    = require('cors')
-const sqlite3 = require('sqlite3').verbose()
-const path    = require('path')
+const { pool, dbAll, dbGet, dbRun } = require('./db')
 
-const app      = express()
-const PORT     = process.env.PORT || 3000
-const DB_PATH  = path.join(__dirname, 'trailgo.db')
+const app  = express()
+const PORT = process.env.PORT || 3000
 
 // ── 中间件 ───────────────────────────────────────────────────────────────────
 app.use(cors())
 app.use(express.json())
-
-// ── 数据库连接 ───────────────────────────────────────────────────────────────
-const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) {
-    console.error('❌ 数据库连接失败，请先运行: npm run init-db')
-    console.error(err.message)
-    process.exit(1)
-  }
-  db.run('PRAGMA foreign_keys = ON')
-  db.run('PRAGMA journal_mode = WAL')
-  console.log('📂 SQLite 连接成功:', DB_PATH)
-})
-
-// ── DB 辅助函数 ───────────────────────────────────────────────────────────────
-const dbAll  = (sql, p = []) => new Promise((ok, fail) => db.all(sql, p, (e, rows) => e ? fail(e) : ok(rows)))
-const dbGet  = (sql, p = []) => new Promise((ok, fail) => db.get(sql, p, (e, row) => e ? fail(e) : ok(row)))
-const dbRun  = (sql, p = []) => new Promise((ok, fail) => db.run(sql, p, function(e) { e ? fail(e) : ok(this) }))
 
 function parseTrail(row) {
   if (!row) return null
@@ -138,7 +118,7 @@ app.post('/api/records', handler(async (req, res) => {
   if (!trail_id || !date)
     return res.status(400).json({ success: false, message: '缺少 trail_id 或 date' })
   const result = await dbRun(
-    'INSERT INTO trip_records (trail_id, date, duration_min, note) VALUES (?, ?, ?, ?)',
+    'INSERT INTO trip_records (trail_id, date, duration_min, note) VALUES (?, ?, ?, ?) RETURNING id',
     [trail_id, date, duration_min || null, note || null]
   )
   res.json({ success: true, id: result.lastID })
@@ -173,21 +153,10 @@ app.get('/api/stats', handler(async (req, res) => {
 }))
 
 // ── 启动 ─────────────────────────────────────────────────────────────────────
-// 支持本地运行和腾讯云 Serverless SCF
-if (process.env.NODE_ENV === 'production' && process.env.SCF_RUN) {
-  // 腾讯云 SCF 环境
-  module.exports.handler = async (event, context) => {
-    const serverless = require('serverless-http')
-    const handler = serverless(app)
-    return handler(event, context)
-  }
-} else {
-  // 本地开发环境
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌄 TrailGo 后端运行在 http://0.0.0.0:${PORT}`)
-    console.log(`   API 文档: GET/POST /api/trails | /api/favorites | /api/records | /api/stats`)
-  })
-}
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🌄 TrailGo 后端运行在 http://0.0.0.0:${PORT}`)
+  console.log(`   API 文档: GET/POST /api/trails | /api/favorites | /api/records | /api/stats`)
+})
 
 // 优雅退出
-process.on('SIGINT', () => { db.close(); process.exit(0) })
+process.on('SIGINT', async () => { await pool.end(); process.exit(0) })
