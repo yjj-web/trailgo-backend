@@ -4,6 +4,7 @@
  */
 const express = require('express')
 const cors    = require('cors')
+const https   = require('https')
 const { pool, dbAll, dbGet, dbRun } = require('./db')
 
 const app  = express()
@@ -151,6 +152,41 @@ app.get('/api/stats', handler(async (req, res) => {
       favCount:   Number(favs.n),
     }
   })
+}))
+
+// ════════════════════════════════════════════════════════════════════════════
+// 天气代理 API —— 由后端（境外服务器）转发 Open-Meteo，规避客户端国内直连慢/失败
+// ════════════════════════════════════════════════════════════════════════════
+
+function fetchJson(url, timeout = 15000) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, (r) => {
+      if (r.statusCode !== 200) {
+        r.resume()
+        return reject(new Error('upstream ' + r.statusCode))
+      }
+      let buf = ''
+      r.on('data', (c) => { buf += c })
+      r.on('end', () => {
+        try { resolve(JSON.parse(buf)) } catch (e) { reject(e) }
+      })
+    })
+    req.setTimeout(timeout, () => req.destroy(new Error('upstream timeout')))
+    req.on('error', reject)
+  })
+}
+
+// GET /api/weather?lat=39.967&lng=115.477
+app.get('/api/weather', handler(async (req, res) => {
+  const lat = req.query.lat || '39.967'
+  const lng = req.query.lng || '115.477'
+  const url = 'https://api.open-meteo.com/v1/forecast'
+    + `?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lng)}`
+    + '&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weathercode'
+    + '&daily=weathercode,temperature_2m_max,temperature_2m_min'
+    + '&forecast_days=3&timezone=Asia%2FShanghai'
+  const data = await fetchJson(url)
+  res.json({ success: true, data })
 }))
 
 // ── 启动 ─────────────────────────────────────────────────────────────────────
