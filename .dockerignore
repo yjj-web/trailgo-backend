@@ -1,0 +1,20 @@
+# 不要把本地（Windows）编译的依赖带进镜像，sqlite3 是原生模块需在 Linux 重新编译
+node_modules
+
+# git 与环境文件
+.git
+.gitignore
+.env
+
+# 打包产物 / 冗余副本
+dist.7z
+trailgo-backend.zip
+trailgo-backend/
+node-starter/
+serverless.yml
+scf_bootstrap
+
+# 本地数据库（容器启动时由 initDb.js 重新生成）
+trailgo.db
+trailgo.db-shm
+trailgo.db-wal

@@ -1,0 +1,11 @@
+node_modules/
+.env
+*.7z
+*.zip
+trailgo.db
+trailgo.db-shm
+trailgo.db-wal
+
+# 冗余副本
+trailgo-backend/
+node-starter/
