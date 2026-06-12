@@ -12,6 +12,18 @@ const run = (sql, params = []) => pool.query(toPg(sql), params)
 
 async function init() {
   // ── 建表 ────────────────────────────────────────────────────────────────────
+  // 用户表
+  await run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id         SERIAL PRIMARY KEY,
+      username   TEXT   NOT NULL UNIQUE,
+      password   TEXT   NOT NULL,
+      nickname   TEXT,
+      avatar     TEXT,
+      created_at TEXT   DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS')
+    )
+  `)
+
   await run(`
     CREATE TABLE IF NOT EXISTS trails (
       id          INTEGER PRIMARY KEY,
@@ -27,11 +39,15 @@ async function init() {
       tags        TEXT    NOT NULL DEFAULT '[]',
       summary     TEXT,
       cover_emoji TEXT    DEFAULT '⛰️',
+      source      TEXT    NOT NULL DEFAULT 'official',
+      user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
       created_at  TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS')
     )
   `)
-  // 兼容已存在的旧表：补 province 列
+  // 兼容已存在的旧表：补新列
   await run(`ALTER TABLE trails ADD COLUMN IF NOT EXISTS province TEXT NOT NULL DEFAULT ''`)
+  await run(`ALTER TABLE trails ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'official'`)
+  await run(`ALTER TABLE trails ADD COLUMN IF NOT EXISTS user_id INTEGER`)
 
   await run(`
     CREATE TABLE IF NOT EXISTS trail_guides (
@@ -82,16 +98,16 @@ async function init() {
     console.log(`ℹ️  种子版本一致 (${current})，跳过重灌`)
     return
   }
-  console.log(`♻️  种子版本变化：${current || '(无)'} → ${seed.SEED_VERSION}，重新写入路线数据`)
+  console.log(`♻️  种子版本变化：${current || '(无)'} → ${seed.SEED_VERSION}，重新写入官方路线数据`)
 
-  // 清空路线（级联清掉 guides/tips/收藏/记录），再写入新种子
-  await run(`DELETE FROM trails`)
+  // 只清官方路线（级联清掉其 guides/tips），保留用户上传的路线
+  await run(`DELETE FROM trails WHERE source = 'official'`)
 
   for (const t of seed.trails) {
     await run(
       `INSERT INTO trails
-         (id,name,province,region,difficulty,distance_km,duration_h,elevation_m,lat,lng,tags,summary,cover_emoji)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         (id,name,province,region,difficulty,distance_km,duration_h,elevation_m,lat,lng,tags,summary,cover_emoji,source)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'official')`,
       t
     )
   }

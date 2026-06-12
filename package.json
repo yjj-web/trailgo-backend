@@ -9,8 +9,10 @@
     "init-db": "node initDb.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.3",
     "pg": "^8.11.5"
   },
   "devDependencies": {

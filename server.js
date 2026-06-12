@@ -6,6 +6,7 @@ const express = require('express')
 const cors    = require('cors')
 const https   = require('https')
 const { pool, dbAll, dbGet, dbRun } = require('./db')
+const { hashPassword, comparePassword, signToken, requireAuth } = require('./auth')
 
 const app  = express()
 const PORT = process.env.PORT || 3000
@@ -30,6 +31,52 @@ function handler(fn) {
     }
   }
 }
+
+function publicUser(u) {
+  if (!u) return null
+  return { id: u.id, username: u.username, nickname: u.nickname || u.username, avatar: u.avatar || null }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 认证 API
+// ════════════════════════════════════════════════════════════════════════════
+
+// POST /api/auth/register  { username, password, nickname? }
+app.post('/api/auth/register', handler(async (req, res) => {
+  const { username, password, nickname } = req.body || {}
+  if (!username || !password)
+    return res.status(400).json({ success: false, message: '用户名和密码不能为空' })
+  if (String(username).length < 3 || String(password).length < 6)
+    return res.status(400).json({ success: false, message: '用户名至少3位，密码至少6位' })
+
+  const exists = await dbGet('SELECT id FROM users WHERE username = ?', [username])
+  if (exists) return res.status(409).json({ success: false, message: '用户名已被注册' })
+
+  const hash = await hashPassword(password)
+  const row = await dbGet(
+    'INSERT INTO users (username, password, nickname) VALUES (?,?,?) RETURNING *',
+    [username, hash, nickname || username]
+  )
+  res.json({ success: true, token: signToken(row), user: publicUser(row) })
+}))
+
+// POST /api/auth/login  { username, password }
+app.post('/api/auth/login', handler(async (req, res) => {
+  const { username, password } = req.body || {}
+  if (!username || !password)
+    return res.status(400).json({ success: false, message: '用户名和密码不能为空' })
+  const row = await dbGet('SELECT * FROM users WHERE username = ?', [username])
+  if (!row || !(await comparePassword(password, row.password)))
+    return res.status(401).json({ success: false, message: '用户名或密码错误' })
+  res.json({ success: true, token: signToken(row), user: publicUser(row) })
+}))
+
+// GET /api/auth/me
+app.get('/api/auth/me', requireAuth, handler(async (req, res) => {
+  const row = await dbGet('SELECT * FROM users WHERE id = ?', [req.user.id])
+  if (!row) return res.status(404).json({ success: false, message: '用户不存在' })
+  res.json({ success: true, user: publicUser(row) })
+}))
 
 // ════════════════════════════════════════════════════════════════════════════
 // 路线 API
@@ -68,6 +115,67 @@ app.get('/api/provinces', handler(async (req, res) => {
     GROUP BY province ORDER BY n DESC, province ASC
   `)
   res.json({ success: true, data: rows })
+}))
+
+// GET /api/trails/mine —— 我上传的路线（需登录）
+app.get('/api/trails/mine', requireAuth, handler(async (req, res) => {
+  const rows = await dbAll('SELECT * FROM trails WHERE user_id = ? ORDER BY id DESC', [req.user.id])
+  res.json({ success: true, data: rows.map(parseTrail) })
+}))
+
+// POST /api/trails —— 用户上传路线（需登录）
+app.post('/api/trails', requireAuth, handler(async (req, res) => {
+  const b = req.body || {}
+  const name = (b.name || '').trim()
+  const difficulty = b.difficulty
+  if (!name) return res.status(400).json({ success: false, message: '路线名称不能为空' })
+  if (!['入门', '进阶', '高难度'].includes(difficulty))
+    return res.status(400).json({ success: false, message: '难度需为 入门/进阶/高难度' })
+
+  const num = (v, d = 0) => (v === '' || v == null || isNaN(Number(v)) ? d : Number(v))
+  const tags = Array.isArray(b.tags) ? b.tags : []
+
+  // 用户路线 id 从 100001 起，避开官方种子 id，重灌官方数据时不受影响
+  const { maxid } = await dbGet('SELECT GREATEST(COALESCE(MAX(id),0), 100000) AS maxid FROM trails')
+  const id = Number(maxid) + 1
+
+  await dbRun(
+    `INSERT INTO trails
+       (id,name,province,region,difficulty,distance_km,duration_h,elevation_m,lat,lng,tags,summary,cover_emoji,source,user_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'user', ?)`,
+    [id, name, (b.province || '').trim(), (b.region || b.province || '').trim(), difficulty,
+     num(b.distance_km), num(b.duration_h), num(b.elevation_m), num(b.lat), num(b.lng),
+     JSON.stringify(tags), (b.summary || '').trim(), b.cover_emoji || '⛰️', req.user.id]
+  )
+
+  // 可选攻略 / 提示
+  if (Array.isArray(b.guides)) {
+    let step = 0
+    for (const g of b.guides) {
+      if (!g || !g.title) continue
+      await dbRun('INSERT INTO trail_guides (trail_id,step_no,title,description) VALUES (?,?,?,?)',
+        [id, ++step, g.title, g.description || ''])
+    }
+  }
+  if (Array.isArray(b.tips)) {
+    for (const t of b.tips) {
+      if (!t || !t.content) continue
+      const type = t.type === 'warn' ? 'warn' : 'good'
+      await dbRun('INSERT INTO trail_tips (trail_id,type,content) VALUES (?,?,?)', [id, type, t.content])
+    }
+  }
+
+  res.json({ success: true, id })
+}))
+
+// DELETE /api/trails/:id —— 删除自己上传的路线（需登录）
+app.delete('/api/trails/:id', requireAuth, handler(async (req, res) => {
+  const trail = await dbGet('SELECT id,user_id,source FROM trails WHERE id = ?', [req.params.id])
+  if (!trail) return res.status(404).json({ success: false, message: '路线不存在' })
+  if (trail.source !== 'user' || trail.user_id !== req.user.id)
+    return res.status(403).json({ success: false, message: '只能删除自己上传的路线' })
+  await dbRun('DELETE FROM trails WHERE id = ?', [req.params.id])
+  res.json({ success: true })
 }))
 
 // GET /api/trails/:id

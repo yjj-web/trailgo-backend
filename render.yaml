@@ -17,3 +17,6 @@ services:
         fromDatabase:
           name: trailgo-db
           property: connectionString
+      # JWT 签名密钥，Render 自动生成并固定（用于用户登录 token）
+      - key: JWT_SECRET
+        generateValue: true
