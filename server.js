@@ -324,6 +324,52 @@ app.get('/api/weather', handler(async (req, res) => {
   res.json({ success: true, data })
 }))
 
+// ════════════════════════════════════════════════════════════════════════════
+// 位置 API —— 后端代理高德 Web 服务（key 不暴露给客户端）
+// ════════════════════════════════════════════════════════════════════════════
+const AMAP_KEY = process.env.AMAP_KEY || 'b180ecfd198102a0e25aa2283300a2f1'
+
+// 省份去后缀，便于与 trails.province 匹配（北京市→北京 / 新疆维吾尔自治区→新疆）
+function normalizeProvince(p) {
+  if (!p) return ''
+  return String(p).replace(/(维吾尔自治区|壮族自治区|回族自治区|自治区|省|市)$/, '')
+}
+
+// GET /api/geo/reverse?lat=&lng=  坐标 → 省/市/区
+app.get('/api/geo/reverse', handler(async (req, res) => {
+  const { lat, lng } = req.query
+  if (!lat || !lng) return res.status(400).json({ success: false, message: '缺少 lat/lng' })
+  const url = `https://restapi.amap.com/v3/geocode/regeo?key=${AMAP_KEY}&location=${lng},${lat}`
+  const r = await fetchJson(url)
+  if (r.status !== '1') return res.status(502).json({ success: false, message: '高德逆地理失败: ' + r.info })
+  const a = r.regeocode.addressComponent || {}
+  res.json({
+    success: true,
+    data: {
+      province: normalizeProvince(a.province),
+      city:     Array.isArray(a.city) ? '' : (a.city || ''),
+      district: a.district || '',
+      formatted: r.regeocode.formatted_address || '',
+    },
+  })
+}))
+
+// GET /api/geo/route?fromLat=&fromLng=&toLat=&toLng=  起终点 → 驾车距离/时长
+app.get('/api/geo/route', handler(async (req, res) => {
+  const { fromLat, fromLng, toLat, toLng } = req.query
+  if (!fromLat || !fromLng || !toLat || !toLng)
+    return res.status(400).json({ success: false, message: '缺少起终点坐标' })
+  const url = `https://restapi.amap.com/v3/direction/driving?key=${AMAP_KEY}`
+    + `&origin=${fromLng},${fromLat}&destination=${toLng},${toLat}`
+  const r = await fetchJson(url)
+  const p = r.status === '1' && r.route && r.route.paths && r.route.paths[0]
+  if (!p) return res.json({ success: true, data: null })
+  res.json({
+    success: true,
+    data: { distance_km: Math.round(p.distance / 100) / 10, duration_min: Math.round(p.duration / 60) },
+  })
+}))
+
 // ── 启动 ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌄 TrailGo 后端运行在 http://0.0.0.0:${PORT}`)

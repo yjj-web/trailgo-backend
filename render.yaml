@@ -20,3 +20,6 @@ services:
       # JWT 签名密钥，Render 自动生成并固定（用于用户登录 token）
       - key: JWT_SECRET
         generateValue: true
+      # 高德 Web 服务 key（逆地理/路线）。不设则用代码内默认值，可在控制台覆盖
+      - key: AMAP_KEY
+        sync: false
