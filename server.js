@@ -35,11 +35,14 @@ function handler(fn) {
 // 路线 API
 // ════════════════════════════════════════════════════════════════════════════
 
-// GET /api/trails?difficulty=进阶&q=百花
+// GET /api/trails?province=陕西&difficulty=进阶&q=百花
 app.get('/api/trails', handler(async (req, res) => {
-  const { difficulty, q } = req.query
+  const { province, difficulty, q } = req.query
   let sql = 'SELECT * FROM trails WHERE 1=1'
   const params = []
+  if (province && province !== '全部') {
+    sql += ' AND province = ?'; params.push(province)
+  }
   if (difficulty && difficulty !== '全部') {
     sql += ' AND difficulty = ?'; params.push(difficulty)
   }
@@ -55,6 +58,16 @@ app.get('/api/trails', handler(async (req, res) => {
   const favSet  = new Set(favRows.map(r => r.trail_id))
   const data    = rows.map(r => ({ ...parseTrail(r), isFavorite: favSet.has(r.id) }))
   res.json({ success: true, data })
+}))
+
+// GET /api/provinces —— 省份列表（按路线数量排序），供前端选择器使用
+app.get('/api/provinces', handler(async (req, res) => {
+  const rows = await dbAll(`
+    SELECT province, COUNT(*)::int AS n
+    FROM trails WHERE province <> ''
+    GROUP BY province ORDER BY n DESC, province ASC
+  `)
+  res.json({ success: true, data: rows })
 }))
 
 // GET /api/trails/:id
