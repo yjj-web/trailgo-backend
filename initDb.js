@@ -48,6 +48,10 @@ async function init() {
   await run(`ALTER TABLE trails ADD COLUMN IF NOT EXISTS province TEXT NOT NULL DEFAULT ''`)
   await run(`ALTER TABLE trails ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'official'`)
   await run(`ALTER TABLE trails ADD COLUMN IF NOT EXISTS user_id INTEGER`)
+  // P1：真实封面图 / 图集 / 路线轨迹
+  await run(`ALTER TABLE trails ADD COLUMN IF NOT EXISTS cover_image TEXT`)
+  await run(`ALTER TABLE trails ADD COLUMN IF NOT EXISTS images TEXT DEFAULT '[]'`)
+  await run(`ALTER TABLE trails ADD COLUMN IF NOT EXISTS path   TEXT DEFAULT '[]'`)
 
   await run(`
     CREATE TABLE IF NOT EXISTS trail_guides (

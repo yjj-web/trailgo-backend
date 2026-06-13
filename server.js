@@ -15,9 +15,17 @@ const PORT = process.env.PORT || 3000
 app.use(cors())
 app.use(express.json())
 
+function safeJson(s, fallback) {
+  try { const v = JSON.parse(s); return v == null ? fallback : v } catch { return fallback }
+}
 function parseTrail(row) {
   if (!row) return null
-  return { ...row, tags: JSON.parse(row.tags || '[]') }
+  return {
+    ...row,
+    tags:   safeJson(row.tags, []),
+    images: safeJson(row.images, []),
+    path:   safeJson(row.path, []),
+  }
 }
 
 // ── 错误处理包装 ─────────────────────────────────────────────────────────────
@@ -136,7 +144,10 @@ app.post('/api/trails', requireAuth, handler(async (req, res) => {
     return res.status(400).json({ success: false, message: '难度需为 入门/进阶/高难度' })
 
   const num = (v, d = 0) => (v === '' || v == null || isNaN(Number(v)) ? d : Number(v))
-  const tags = Array.isArray(b.tags) ? b.tags : []
+  const tags   = Array.isArray(b.tags) ? b.tags : []
+  const images = Array.isArray(b.images) ? b.images.filter(Boolean) : []
+  const path   = Array.isArray(b.path) ? b.path : []
+  const coverImage = (b.cover_image || '').trim() || null
 
   // 用户路线 id 从 100001 起，避开官方种子 id，重灌官方数据时不受影响
   const { maxid } = await dbGet('SELECT GREATEST(COALESCE(MAX(id),0), 100000) AS maxid FROM trails')
@@ -144,11 +155,12 @@ app.post('/api/trails', requireAuth, handler(async (req, res) => {
 
   await dbRun(
     `INSERT INTO trails
-       (id,name,province,region,difficulty,distance_km,duration_h,elevation_m,lat,lng,tags,summary,cover_emoji,source,user_id)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'user', ?)`,
+       (id,name,province,region,difficulty,distance_km,duration_h,elevation_m,lat,lng,tags,summary,cover_emoji,cover_image,images,path,source,user_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'user', ?)`,
     [id, name, (b.province || '').trim(), (b.region || b.province || '').trim(), difficulty,
      num(b.distance_km), num(b.duration_h), num(b.elevation_m), num(b.lat), num(b.lng),
-     JSON.stringify(tags), (b.summary || '').trim(), b.cover_emoji || '⛰️', req.user.id]
+     JSON.stringify(tags), (b.summary || '').trim(), b.cover_emoji || '⛰️',
+     coverImage, JSON.stringify(images), JSON.stringify(path), req.user.id]
   )
 
   // 可选攻略 / 提示
@@ -376,6 +388,42 @@ app.get('/api/geo/route', handler(async (req, res) => {
     success: true,
     data: { distance_km: Math.round(p.distance / 100) / 10, duration_min: Math.round(p.duration / 60) },
   })
+}))
+
+// 把上游图片字节流原样转发给客户端（key 不暴露）
+function pipeImage(url, res, timeout = 15000) {
+  const upstream = https.get(url, (u) => {
+    if (u.statusCode !== 200) { u.resume(); if (!res.headersSent) res.status(502).end(); return }
+    res.set('Content-Type', u.headers['content-type'] || 'image/png')
+    res.set('Cache-Control', 'public, max-age=86400')
+    u.pipe(res)
+  })
+  upstream.setTimeout(timeout, () => upstream.destroy(new Error('staticmap timeout')))
+  upstream.on('error', () => { if (!res.headersSent) res.status(502).end() })
+}
+
+// GET /api/geo/staticmap?id=  或  ?lat=&lng=  → 高德静态地图图片（登山口标记 + 有轨迹则画线）
+app.get('/api/geo/staticmap', handler(async (req, res) => {
+  let { lat, lng, id } = req.query
+  let pathPts = []
+  if (id) {
+    const t = await dbGet('SELECT lat,lng,path FROM trails WHERE id = ?', [id])
+    if (!t) return res.status(404).json({ success: false, message: '路线不存在' })
+    lat = t.lat; lng = t.lng; pathPts = safeJson(t.path, [])
+  }
+  if (lat == null || lng == null || lat === '' || lng === '')
+    return res.status(400).json({ success: false, message: '缺少坐标' })
+
+  let url = `https://restapi.amap.com/v3/staticmap?key=${AMAP_KEY}`
+    + `&location=${lng},${lat}&size=720*360&scale=2`
+    + `&markers=large,0x1D9E75,:${lng},${lat}`
+  if (Array.isArray(pathPts) && pathPts.length > 1) {
+    const pts = pathPts.map(p => `${p[0]},${p[1]}`).join(';')
+    url += `&paths=6,0x1D9E75,1,,:${pts}`   // 有轨迹：让高德按路线自适应缩放
+  } else {
+    url += `&zoom=12`
+  }
+  pipeImage(url, res)
 }))
 
 // ── 启动 ─────────────────────────────────────────────────────────────────────
