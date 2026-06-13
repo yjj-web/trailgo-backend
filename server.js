@@ -6,7 +6,7 @@ const express = require('express')
 const cors    = require('cors')
 const https   = require('https')
 const { pool, dbAll, dbGet, dbRun } = require('./db')
-const { hashPassword, comparePassword, signToken, requireAuth } = require('./auth')
+const { hashPassword, comparePassword, signToken, requireAuth, optionalAuth } = require('./auth')
 
 const app  = express()
 const PORT = process.env.PORT || 3000
@@ -83,7 +83,7 @@ app.get('/api/auth/me', requireAuth, handler(async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 
 // GET /api/trails?province=陕西&difficulty=进阶&q=百花
-app.get('/api/trails', handler(async (req, res) => {
+app.get('/api/trails', optionalAuth, handler(async (req, res) => {
   const { province, difficulty, q } = req.query
   let sql = 'SELECT * FROM trails WHERE 1=1'
   const params = []
@@ -100,10 +100,13 @@ app.get('/api/trails', handler(async (req, res) => {
   sql += ' ORDER BY id ASC'
 
   const rows = await dbAll(sql, params)
-  // 标记收藏状态
-  const favRows = await dbAll('SELECT trail_id FROM favorites')
-  const favSet  = new Set(favRows.map(r => r.trail_id))
-  const data    = rows.map(r => ({ ...parseTrail(r), isFavorite: favSet.has(r.id) }))
+  // 标记收藏状态（仅当前登录用户的收藏；未登录则都为 false）
+  const favSet = new Set()
+  if (req.user) {
+    const favRows = await dbAll('SELECT trail_id FROM favorites WHERE user_id = ?', [req.user.id])
+    favRows.forEach(r => favSet.add(r.trail_id))
+  }
+  const data = rows.map(r => ({ ...parseTrail(r), isFavorite: favSet.has(r.id) }))
   res.json({ success: true, data })
 }))
 
@@ -179,14 +182,16 @@ app.delete('/api/trails/:id', requireAuth, handler(async (req, res) => {
 }))
 
 // GET /api/trails/:id
-app.get('/api/trails/:id', handler(async (req, res) => {
+app.get('/api/trails/:id', optionalAuth, handler(async (req, res) => {
   const trail = parseTrail(await dbGet('SELECT * FROM trails WHERE id = ?', [req.params.id]))
   if (!trail) return res.status(404).json({ success: false, message: '路线不存在' })
 
   const [guides, tips, fav] = await Promise.all([
     dbAll('SELECT * FROM trail_guides WHERE trail_id = ? ORDER BY step_no', [trail.id]),
     dbAll('SELECT * FROM trail_tips  WHERE trail_id = ?', [trail.id]),
-    dbGet('SELECT id FROM favorites  WHERE trail_id = ?', [trail.id]),
+    req.user
+      ? dbGet('SELECT id FROM favorites WHERE trail_id = ? AND user_id = ?', [trail.id, req.user.id])
+      : Promise.resolve(null),
   ])
   res.json({ success: true, data: { ...trail, guides, tips, isFavorite: !!fav } })
 }))
@@ -195,26 +200,27 @@ app.get('/api/trails/:id', handler(async (req, res) => {
 // 收藏 API
 // ════════════════════════════════════════════════════════════════════════════
 
-// GET /api/favorites
-app.get('/api/favorites', handler(async (req, res) => {
+// GET /api/favorites —— 当前用户的收藏（需登录）
+app.get('/api/favorites', requireAuth, handler(async (req, res) => {
   const rows = await dbAll(`
     SELECT t.*, f.created_at AS fav_at
     FROM favorites f
     JOIN trails t ON t.id = f.trail_id
+    WHERE f.user_id = ?
     ORDER BY f.created_at DESC
-  `)
+  `, [req.user.id])
   res.json({ success: true, data: rows.map(r => ({ ...parseTrail(r), isFavorite: true })) })
 }))
 
-// POST /api/favorites/:trailId  (toggle)
-app.post('/api/favorites/:trailId', handler(async (req, res) => {
+// POST /api/favorites/:trailId  (toggle，需登录)
+app.post('/api/favorites/:trailId', requireAuth, handler(async (req, res) => {
   const trailId = Number(req.params.trailId)
-  const exists  = await dbGet('SELECT id FROM favorites WHERE trail_id = ?', [trailId])
+  const exists  = await dbGet('SELECT id FROM favorites WHERE trail_id = ? AND user_id = ?', [trailId, req.user.id])
   if (exists) {
-    await dbRun('DELETE FROM favorites WHERE trail_id = ?', [trailId])
+    await dbRun('DELETE FROM favorites WHERE trail_id = ? AND user_id = ?', [trailId, req.user.id])
     res.json({ success: true, isFavorite: false })
   } else {
-    await dbRun('INSERT INTO favorites (trail_id) VALUES (?)', [trailId])
+    await dbRun('INSERT INTO favorites (trail_id, user_id) VALUES (?, ?)', [trailId, req.user.id])
     res.json({ success: true, isFavorite: true })
   }
 }))
@@ -223,32 +229,33 @@ app.post('/api/favorites/:trailId', handler(async (req, res) => {
 // 出行记录 API
 // ════════════════════════════════════════════════════════════════════════════
 
-// GET /api/records
-app.get('/api/records', handler(async (req, res) => {
+// GET /api/records —— 当前用户的出行记录（需登录）
+app.get('/api/records', requireAuth, handler(async (req, res) => {
   const rows = await dbAll(`
     SELECT r.*, t.name AS trail_name, t.region, t.difficulty, t.cover_emoji, t.distance_km
     FROM trip_records r
     JOIN trails t ON t.id = r.trail_id
+    WHERE r.user_id = ?
     ORDER BY r.date DESC
-  `)
+  `, [req.user.id])
   res.json({ success: true, data: rows })
 }))
 
-// POST /api/records
-app.post('/api/records', handler(async (req, res) => {
+// POST /api/records（需登录）
+app.post('/api/records', requireAuth, handler(async (req, res) => {
   const { trail_id, date, duration_min, note } = req.body
   if (!trail_id || !date)
     return res.status(400).json({ success: false, message: '缺少 trail_id 或 date' })
   const result = await dbRun(
-    'INSERT INTO trip_records (trail_id, date, duration_min, note) VALUES (?, ?, ?, ?) RETURNING id',
-    [trail_id, date, duration_min || null, note || null]
+    'INSERT INTO trip_records (trail_id, date, duration_min, note, user_id) VALUES (?, ?, ?, ?, ?) RETURNING id',
+    [trail_id, date, duration_min || null, note || null, req.user.id]
   )
   res.json({ success: true, id: result.lastID })
 }))
 
-// DELETE /api/records/:id
-app.delete('/api/records/:id', handler(async (req, res) => {
-  await dbRun('DELETE FROM trip_records WHERE id = ?', [req.params.id])
+// DELETE /api/records/:id（需登录，仅能删自己的）
+app.delete('/api/records/:id', requireAuth, handler(async (req, res) => {
+  await dbRun('DELETE FROM trip_records WHERE id = ? AND user_id = ?', [req.params.id, req.user.id])
   res.json({ success: true })
 }))
 
@@ -256,12 +263,13 @@ app.delete('/api/records/:id', handler(async (req, res) => {
 // 统计 API
 // ════════════════════════════════════════════════════════════════════════════
 
-app.get('/api/stats', handler(async (req, res) => {
+app.get('/api/stats', requireAuth, handler(async (req, res) => {
+  const uid = req.user.id
   const [trips, km, elev, favs] = await Promise.all([
-    dbGet('SELECT COUNT(*) AS n FROM trip_records'),
-    dbGet('SELECT COALESCE(SUM(t.distance_km),0) AS total FROM trip_records r JOIN trails t ON t.id=r.trail_id'),
-    dbGet('SELECT COALESCE(SUM(t.elevation_m),0) AS total FROM trip_records r JOIN trails t ON t.id=r.trail_id'),
-    dbGet('SELECT COUNT(*) AS n FROM favorites'),
+    dbGet('SELECT COUNT(*) AS n FROM trip_records WHERE user_id = ?', [uid]),
+    dbGet('SELECT COALESCE(SUM(t.distance_km),0) AS total FROM trip_records r JOIN trails t ON t.id=r.trail_id WHERE r.user_id = ?', [uid]),
+    dbGet('SELECT COALESCE(SUM(t.elevation_m),0) AS total FROM trip_records r JOIN trails t ON t.id=r.trail_id WHERE r.user_id = ?', [uid]),
+    dbGet('SELECT COUNT(*) AS n FROM favorites WHERE user_id = ?', [uid]),
   ])
   // pg 的 COUNT/SUM 返回字符串，统一转为数字以保持 API 契约
   res.json({

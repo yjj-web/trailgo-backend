@@ -88,6 +88,18 @@ async function init() {
     )
   `)
 
+  // ── 兼容旧表：收藏 / 出行记录绑定用户 ─────────────────────────────────────────
+  // 早期版本 favorites / trip_records 无 user_id（全局共享），这里补列并按用户隔离
+  await run(`ALTER TABLE favorites    ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE`)
+  await run(`ALTER TABLE trip_records ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE`)
+  // 清掉历史「匿名/全局」收藏与记录（含早期测试残留数据），避免跨用户串数据
+  await run(`DELETE FROM favorites    WHERE user_id IS NULL`)
+  await run(`DELETE FROM trip_records WHERE user_id IS NULL`)
+  // 收藏唯一约束：从 (trail_id) 改为 (trail_id, user_id)，允许不同用户收藏同一路线
+  await run(`ALTER TABLE favorites DROP CONSTRAINT IF EXISTS favorites_trail_id_key`)
+  await run(`ALTER TABLE favorites DROP CONSTRAINT IF EXISTS favorites_trail_user_key`)
+  await run(`ALTER TABLE favorites ADD  CONSTRAINT favorites_trail_user_key UNIQUE (trail_id, user_id)`)
+
   // 元数据表：记录种子版本
   await run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`)
 
