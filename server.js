@@ -5,6 +5,7 @@
 const express = require('express')
 const cors    = require('cors')
 const https   = require('https')
+const crypto  = require('crypto')
 const { pool, dbAll, dbGet, dbRun } = require('./db')
 const { hashPassword, comparePassword, signToken, requireAuth, optionalAuth } = require('./auth')
 
@@ -424,6 +425,47 @@ app.get('/api/geo/staticmap', handler(async (req, res) => {
     url += `&zoom=12`
   }
   pipeImage(url, res)
+}))
+
+// ════════════════════════════════════════════════════════════════════════════
+// 对象存储（七牛）—— 前端直传：后端只签发上传凭证，图片字节不经过本服务
+//   需在环境变量配置：QINIU_AK / QINIU_SK / QINIU_BUCKET / QINIU_DOMAIN（公开访问域名，
+//   形如 https://cdn.example.com，不带结尾斜杠）/ QINIU_UP_HOST（可选，默认华东）
+// ════════════════════════════════════════════════════════════════════════════
+const QINIU = {
+  ak:     process.env.QINIU_AK     || '',
+  sk:     process.env.QINIU_SK     || '',
+  bucket: process.env.QINIU_BUCKET || '',
+  domain: (process.env.QINIU_DOMAIN || '').replace(/\/+$/, ''),
+  upHost: process.env.QINIU_UP_HOST || 'https://up.qiniup.com',
+}
+// 七牛 URL-safe base64
+function b64url(buf) {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_')
+}
+function qiniuUploadToken(putPolicy) {
+  const encoded = b64url(Buffer.from(JSON.stringify(putPolicy)))
+  const sign    = b64url(crypto.createHmac('sha1', QINIU.sk).update(encoded).digest())
+  return `${QINIU.ak}:${sign}:${encoded}`
+}
+
+// GET /api/upload/token?ext=jpg —— 签发七牛上传凭证（需登录）
+app.get('/api/upload/token', requireAuth, handler(async (req, res) => {
+  if (!QINIU.ak || !QINIU.sk || !QINIU.bucket || !QINIU.domain) {
+    return res.status(503).json({ success: false, message: '对象存储未配置（缺少 QINIU_* 环境变量）' })
+  }
+  const ext = String(req.query.ext || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5) || 'jpg'
+  const key = `trails/${req.user.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`
+  const putPolicy = {
+    scope:      `${QINIU.bucket}:${key}`,  // 限定到具体 key，避免覆盖他人文件
+    deadline:   Math.floor(Date.now() / 1000) + 3600,
+    fsizeLimit: 5 * 1024 * 1024,           // 单图最大 5MB
+    mimeLimit:  'image/*',                  // 仅允许图片
+  }
+  res.json({
+    success: true,
+    data: { token: qiniuUploadToken(putPolicy), key, upHost: QINIU.upHost, domain: QINIU.domain },
+  })
 }))
 
 // ── 启动 ─────────────────────────────────────────────────────────────────────
