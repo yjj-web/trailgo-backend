@@ -42,12 +42,14 @@ function optionalAuth(req, res, next) {
   next()
 }
 
-// 管理员判定：环境变量 ADMIN_USERNAMES（逗号分隔的用户名白名单）
-// 在 Render 里填上你的用户名即可，无需改数据库或重发 token
-const ADMIN_SET = new Set(
-  String(process.env.ADMIN_USERNAMES || '')
-    .split(',').map(s => s.trim()).filter(Boolean)
-)
+// 管理员判定：内置默认管理员 + 环境变量 ADMIN_USERNAMES（逗号分隔白名单，可追加）
+// 想再加管理员，在 Render 填 ADMIN_USERNAMES 即可，无需改数据库或重发 token
+const DEFAULT_ADMINS = ['yjj']
+const ADMIN_SET = new Set([
+  ...DEFAULT_ADMINS,
+  ...String(process.env.ADMIN_USERNAMES || '')
+    .split(',').map(s => s.trim()).filter(Boolean),
+])
 function isAdmin(user) {
   return !!(user && user.username && ADMIN_SET.has(user.username))
 }
