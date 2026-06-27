@@ -91,13 +91,16 @@ app.get('/api/auth/me', requireAuth, handler(async (req, res) => {
 // 路线 API
 // ════════════════════════════════════════════════════════════════════════════
 
-// GET /api/trails?province=陕西&difficulty=进阶&q=百花
+// GET /api/trails?province=陕西&city=西安&difficulty=进阶&q=百花
 app.get('/api/trails', optionalAuth, handler(async (req, res) => {
-  const { province, difficulty, q } = req.query
+  const { province, city, difficulty, q } = req.query
   let sql = 'SELECT * FROM trails WHERE 1=1'
   const params = []
   if (province && province !== '全部') {
     sql += ' AND province = ?'; params.push(province)
+  }
+  if (city) {
+    sql += ' AND region LIKE ?'; params.push(`%·${city}%`)
   }
   if (difficulty && difficulty !== '全部') {
     sql += ' AND difficulty = ?'; params.push(difficulty)
@@ -126,6 +129,23 @@ app.get('/api/provinces', handler(async (req, res) => {
     FROM trails WHERE province <> ''
     GROUP BY province ORDER BY n DESC, province ASC
   `)
+  res.json({ success: true, data: rows })
+}))
+
+// GET /api/cities?province=XX —— 从 region 字段解析城市（格式：省·市·区）
+app.get('/api/cities', handler(async (req, res) => {
+  const { province } = req.query
+  if (!province) return res.json({ success: true, data: [] })
+  const rows = await dbAll(`
+    SELECT
+      NULLIF(TRIM(split_part(region, '·', 2)), '') AS city,
+      COUNT(*)::int AS n
+    FROM trails
+    WHERE province = ?
+      AND NULLIF(TRIM(split_part(region, '·', 2)), '') IS NOT NULL
+    GROUP BY city
+    ORDER BY n DESC, city ASC
+  `, [province])
   res.json({ success: true, data: rows })
 }))
 
