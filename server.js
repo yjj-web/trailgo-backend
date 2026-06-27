@@ -204,6 +204,40 @@ app.post('/api/trails', requireAuth, handler(async (req, res) => {
   res.json({ success: true, id })
 }))
 
+// PUT /api/trails/:id —— 编辑自己上传的路线（需登录）
+app.put('/api/trails/:id', requireAuth, handler(async (req, res) => {
+  const trail = await dbGet('SELECT id,user_id,source FROM trails WHERE id = ?', [req.params.id])
+  if (!trail) return res.status(404).json({ success: false, message: '路线不存在' })
+  if (trail.source !== 'user' || trail.user_id !== req.user.id)
+    return res.status(403).json({ success: false, message: '只能编辑自己上传的路线' })
+
+  const b = req.body || {}
+  const name = (b.name || '').trim()
+  const difficulty = b.difficulty
+  if (!name) return res.status(400).json({ success: false, message: '路线名称不能为空' })
+  if (!['入门', '进阶', '高难度'].includes(difficulty))
+    return res.status(400).json({ success: false, message: '难度需为 入门/进阶/高难度' })
+
+  const num = (v, d = 0) => (v === '' || v == null || isNaN(Number(v)) ? d : Number(v))
+  const tags   = Array.isArray(b.tags) ? b.tags : []
+  const images = Array.isArray(b.images) ? b.images.filter(Boolean) : []
+  const coverImage = (b.cover_image || '').trim() || null
+
+  await dbRun(
+    `UPDATE trails SET
+       name=?, province=?, region=?, difficulty=?,
+       distance_km=?, duration_h=?, elevation_m=?, lat=?, lng=?,
+       tags=?, summary=?, cover_emoji=?, cover_image=?, images=?
+     WHERE id=?`,
+    [name, (b.province || '').trim(), (b.region || b.province || '').trim(), difficulty,
+     num(b.distance_km), num(b.duration_h), num(b.elevation_m), num(b.lat), num(b.lng),
+     JSON.stringify(tags), (b.summary || '').trim(), b.cover_emoji || '⛰️',
+     coverImage, JSON.stringify(images), req.params.id]
+  )
+
+  res.json({ success: true, id: Number(req.params.id) })
+}))
+
 // DELETE /api/trails/:id —— 删除自己上传的路线（需登录）
 app.delete('/api/trails/:id', requireAuth, handler(async (req, res) => {
   const trail = await dbGet('SELECT id,user_id,source FROM trails WHERE id = ?', [req.params.id])
