@@ -87,6 +87,34 @@ app.get('/api/auth/me', requireAuth, handler(async (req, res) => {
   res.json({ success: true, user: publicUser(row) })
 }))
 
+// PUT /api/auth/me  { nickname?, avatar? } —— 更新个人资料（需登录）
+app.put('/api/auth/me', requireAuth, handler(async (req, res) => {
+  const b = req.body || {}
+  const fields = []
+  const params = []
+  if (b.nickname != null) { fields.push('nickname = ?'); params.push(String(b.nickname).trim().slice(0, 20) || null) }
+  if (b.avatar   != null) { fields.push('avatar = ?');   params.push(String(b.avatar).trim() || null) }
+  if (!fields.length) return res.status(400).json({ success: false, message: '没有要更新的内容' })
+  params.push(req.user.id)
+  await dbRun(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`, params)
+  const row = await dbGet('SELECT * FROM users WHERE id = ?', [req.user.id])
+  res.json({ success: true, user: publicUser(row) })
+}))
+
+// POST /api/auth/password  { oldPassword, newPassword } —— 修改密码（需登录）
+app.post('/api/auth/password', requireAuth, handler(async (req, res) => {
+  const { oldPassword, newPassword } = req.body || {}
+  if (!oldPassword || !newPassword)
+    return res.status(400).json({ success: false, message: '请填写原密码和新密码' })
+  if (String(newPassword).length < 6)
+    return res.status(400).json({ success: false, message: '新密码至少6位' })
+  const row = await dbGet('SELECT * FROM users WHERE id = ?', [req.user.id])
+  if (!row || !(await comparePassword(oldPassword, row.password)))
+    return res.status(401).json({ success: false, message: '原密码错误' })
+  await dbRun('UPDATE users SET password = ? WHERE id = ?', [await hashPassword(newPassword), req.user.id])
+  res.json({ success: true })
+}))
+
 // ════════════════════════════════════════════════════════════════════════════
 // 路线 API
 // ════════════════════════════════════════════════════════════════════════════
@@ -118,7 +146,16 @@ app.get('/api/trails', optionalAuth, handler(async (req, res) => {
     const favRows = await dbAll('SELECT trail_id FROM favorites WHERE user_id = ?', [req.user.id])
     favRows.forEach(r => favSet.add(r.trail_id))
   }
-  const data = rows.map(r => ({ ...parseTrail(r), isFavorite: favSet.has(r.id) }))
+  // 评分聚合（平均分 + 条数）
+  const rateMap = {}
+  const rateRows = await dbAll('SELECT trail_id, AVG(rating)::numeric(3,1) AS avg, COUNT(*)::int AS n FROM reviews GROUP BY trail_id')
+  rateRows.forEach(r => { rateMap[r.trail_id] = { rating: Number(r.avg), rating_count: r.n } })
+  const data = rows.map(r => ({
+    ...parseTrail(r),
+    isFavorite: favSet.has(r.id),
+    rating: rateMap[r.id] ? rateMap[r.id].rating : null,
+    rating_count: rateMap[r.id] ? rateMap[r.id].rating_count : 0,
+  }))
   res.json({ success: true, data })
 }))
 
@@ -235,6 +272,26 @@ app.put('/api/trails/:id', requireAuth, handler(async (req, res) => {
      coverImage, JSON.stringify(images), req.params.id]
   )
 
+  // 攻略 / 提示：先清空再按提交内容重建
+  const tid = Number(req.params.id)
+  if (Array.isArray(b.guides)) {
+    await dbRun('DELETE FROM trail_guides WHERE trail_id = ?', [tid])
+    let step = 0
+    for (const g of b.guides) {
+      if (!g || !g.title) continue
+      await dbRun('INSERT INTO trail_guides (trail_id,step_no,title,description) VALUES (?,?,?,?)',
+        [tid, ++step, g.title, g.description || ''])
+    }
+  }
+  if (Array.isArray(b.tips)) {
+    await dbRun('DELETE FROM trail_tips WHERE trail_id = ?', [tid])
+    for (const t of b.tips) {
+      if (!t || !t.content) continue
+      const type = t.type === 'warn' ? 'warn' : 'good'
+      await dbRun('INSERT INTO trail_tips (trail_id,type,content) VALUES (?,?,?)', [tid, type, t.content])
+    }
+  }
+
   res.json({ success: true, id: Number(req.params.id) })
 }))
 
@@ -253,14 +310,33 @@ app.get('/api/trails/:id', optionalAuth, handler(async (req, res) => {
   const trail = parseTrail(await dbGet('SELECT * FROM trails WHERE id = ?', [req.params.id]))
   if (!trail) return res.status(404).json({ success: false, message: '路线不存在' })
 
-  const [guides, tips, fav] = await Promise.all([
+  const [guides, tips, fav, agg, reviews, myReview] = await Promise.all([
     dbAll('SELECT * FROM trail_guides WHERE trail_id = ? ORDER BY step_no', [trail.id]),
     dbAll('SELECT * FROM trail_tips  WHERE trail_id = ?', [trail.id]),
     req.user
       ? dbGet('SELECT id FROM favorites WHERE trail_id = ? AND user_id = ?', [trail.id, req.user.id])
       : Promise.resolve(null),
+    dbGet('SELECT AVG(rating)::numeric(3,1) AS avg, COUNT(*)::int AS n FROM reviews WHERE trail_id = ?', [trail.id]),
+    dbAll(`
+      SELECT r.id, r.rating, r.content, r.created_at,
+             COALESCE(u.nickname, u.username) AS user_name, u.avatar AS user_avatar
+      FROM reviews r JOIN users u ON u.id = r.user_id
+      WHERE r.trail_id = ? ORDER BY r.created_at DESC LIMIT 20
+    `, [trail.id]),
+    req.user
+      ? dbGet('SELECT id, rating, content FROM reviews WHERE trail_id = ? AND user_id = ?', [trail.id, req.user.id])
+      : Promise.resolve(null),
   ])
-  res.json({ success: true, data: { ...trail, guides, tips, isFavorite: !!fav } })
+  res.json({
+    success: true,
+    data: {
+      ...trail, guides, tips, isFavorite: !!fav,
+      rating: agg && agg.n ? Number(agg.avg) : null,
+      rating_count: agg ? agg.n : 0,
+      reviews,
+      myReview: myReview || null,
+    },
+  })
 }))
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -290,6 +366,38 @@ app.post('/api/favorites/:trailId', requireAuth, handler(async (req, res) => {
     await dbRun('INSERT INTO favorites (trail_id, user_id) VALUES (?, ?)', [trailId, req.user.id])
     res.json({ success: true, isFavorite: true })
   }
+}))
+
+// ════════════════════════════════════════════════════════════════════════════
+// 评价 API
+// ════════════════════════════════════════════════════════════════════════════
+
+// POST /api/reviews/:trailId  { rating(1-5), content? } —— 新增/更新自己的评价（需登录）
+app.post('/api/reviews/:trailId', requireAuth, handler(async (req, res) => {
+  const trailId = Number(req.params.trailId)
+  const rating = Math.round(Number(req.body && req.body.rating))
+  const content = String((req.body && req.body.content) || '').trim().slice(0, 500)
+  if (!(rating >= 1 && rating <= 5))
+    return res.status(400).json({ success: false, message: '评分需为 1~5' })
+  const trail = await dbGet('SELECT id FROM trails WHERE id = ?', [trailId])
+  if (!trail) return res.status(404).json({ success: false, message: '路线不存在' })
+
+  await dbRun(`
+    INSERT INTO reviews (trail_id, user_id, rating, content)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT (trail_id, user_id)
+    DO UPDATE SET rating = EXCLUDED.rating, content = EXCLUDED.content,
+                  created_at = to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS')
+  `, [trailId, req.user.id, rating, content])
+
+  const agg = await dbGet('SELECT AVG(rating)::numeric(3,1) AS avg, COUNT(*)::int AS n FROM reviews WHERE trail_id = ?', [trailId])
+  res.json({ success: true, rating: Number(agg.avg), rating_count: agg.n })
+}))
+
+// DELETE /api/reviews/:trailId —— 删除自己的评价（需登录）
+app.delete('/api/reviews/:trailId', requireAuth, handler(async (req, res) => {
+  await dbRun('DELETE FROM reviews WHERE trail_id = ? AND user_id = ?', [Number(req.params.trailId), req.user.id])
+  res.json({ success: true })
 }))
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -522,11 +630,30 @@ app.get('/api/upload/token', requireAuth, handler(async (req, res) => {
   })
 }))
 
+// ── 启动前确保新表存在（幂等，Render 部署无需手动迁移）──────────────────────────
+async function ensureSchema() {
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS reviews (
+      id         SERIAL  PRIMARY KEY,
+      trail_id   INTEGER NOT NULL REFERENCES trails(id) ON DELETE CASCADE,
+      user_id    INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+      rating     INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+      content    TEXT    DEFAULT '',
+      created_at TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS'),
+      UNIQUE(trail_id, user_id)
+    )
+  `)
+}
+
 // ── 启动 ─────────────────────────────────────────────────────────────────────
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌄 TrailGo 后端运行在 http://0.0.0.0:${PORT}`)
-  console.log(`   API 文档: GET/POST /api/trails | /api/favorites | /api/records | /api/stats`)
-})
+ensureSchema()
+  .catch(err => console.error('ensureSchema 失败:', err))
+  .finally(() => {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`🌄 TrailGo 后端运行在 http://0.0.0.0:${PORT}`)
+      console.log(`   API 文档: GET/POST /api/trails | /api/favorites | /api/records | /api/stats | /api/reviews`)
+    })
+  })
 
 // 优雅退出
 process.on('SIGINT', async () => { await pool.end(); process.exit(0) })
