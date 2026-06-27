@@ -430,9 +430,55 @@ app.post('/api/records', requireAuth, handler(async (req, res) => {
   res.json({ success: true, id: result.lastID })
 }))
 
+// PUT /api/records/:id（需登录，仅能改自己的）—— 编辑日期/用时/感受
+app.put('/api/records/:id', requireAuth, handler(async (req, res) => {
+  const rec = await dbGet('SELECT id, user_id FROM trip_records WHERE id = ?', [req.params.id])
+  if (!rec) return res.status(404).json({ success: false, message: '记录不存在' })
+  if (rec.user_id !== req.user.id) return res.status(403).json({ success: false, message: '只能编辑自己的记录' })
+  const { date, duration_min, note } = req.body || {}
+  if (!date) return res.status(400).json({ success: false, message: '请选择日期' })
+  await dbRun(
+    'UPDATE trip_records SET date = ?, duration_min = ?, note = ? WHERE id = ? AND user_id = ?',
+    [date, duration_min || null, note || null, req.params.id, req.user.id]
+  )
+  res.json({ success: true })
+}))
+
 // DELETE /api/records/:id（需登录，仅能删自己的）
 app.delete('/api/records/:id', requireAuth, handler(async (req, res) => {
   await dbRun('DELETE FROM trip_records WHERE id = ? AND user_id = ?', [req.params.id, req.user.id])
+  res.json({ success: true })
+}))
+
+// ════════════════════════════════════════════════════════════════════════════
+// GPS 轨迹 API
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/tracks —— 当前用户的轨迹（需登录）
+app.get('/api/tracks', requireAuth, handler(async (req, res) => {
+  const rows = await dbAll('SELECT * FROM tracks WHERE user_id = ? ORDER BY date DESC, id DESC', [req.user.id])
+  res.json({ success: true, data: rows.map(r => ({ ...r, path: safeJson(r.path, []) })) })
+}))
+
+// POST /api/tracks —— 保存一条轨迹（需登录）
+app.post('/api/tracks', requireAuth, handler(async (req, res) => {
+  const b = req.body || {}
+  const num = (v, d = 0) => (v === '' || v == null || isNaN(Number(v)) ? d : Number(v))
+  const path = Array.isArray(b.path) ? b.path : []
+  if (!b.date) return res.status(400).json({ success: false, message: '缺少日期' })
+  const result = await dbRun(
+    `INSERT INTO tracks (user_id, name, date, distance_km, duration_min, elevation_m, path)
+     VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    [req.user.id, String(b.name || '徒步轨迹').slice(0, 40), b.date,
+     num(b.distance_km), Math.round(num(b.duration_min)), Math.round(num(b.elevation_m)),
+     JSON.stringify(path)]
+  )
+  res.json({ success: true, id: result.lastID })
+}))
+
+// DELETE /api/tracks/:id（需登录，仅能删自己的）
+app.delete('/api/tracks/:id', requireAuth, handler(async (req, res) => {
+  await dbRun('DELETE FROM tracks WHERE id = ? AND user_id = ?', [req.params.id, req.user.id])
   res.json({ success: true })
 }))
 
@@ -643,6 +689,20 @@ async function ensureSchema() {
       content    TEXT    DEFAULT '',
       created_at TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS'),
       UNIQUE(trail_id, user_id)
+    )
+  `)
+  // GPS 实时轨迹（不依赖具体路线，独立记录）
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS tracks (
+      id           SERIAL  PRIMARY KEY,
+      user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name         TEXT    NOT NULL DEFAULT '徒步轨迹',
+      date         TEXT    NOT NULL,
+      distance_km  REAL    NOT NULL DEFAULT 0,
+      duration_min INTEGER NOT NULL DEFAULT 0,
+      elevation_m  INTEGER NOT NULL DEFAULT 0,
+      path         TEXT    NOT NULL DEFAULT '[]',
+      created_at   TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS')
     )
   `)
 }
