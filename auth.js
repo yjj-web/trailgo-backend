@@ -42,4 +42,14 @@ function optionalAuth(req, res, next) {
   next()
 }
 
-module.exports = { hashPassword, comparePassword, signToken, verifyToken, requireAuth, optionalAuth }
+// 管理员判定：环境变量 ADMIN_USERNAMES（逗号分隔的用户名白名单）
+// 在 Render 里填上你的用户名即可，无需改数据库或重发 token
+const ADMIN_SET = new Set(
+  String(process.env.ADMIN_USERNAMES || '')
+    .split(',').map(s => s.trim()).filter(Boolean)
+)
+function isAdmin(user) {
+  return !!(user && user.username && ADMIN_SET.has(user.username))
+}
+
+module.exports = { hashPassword, comparePassword, signToken, verifyToken, requireAuth, optionalAuth, isAdmin }

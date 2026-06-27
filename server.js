@@ -7,7 +7,7 @@ const cors    = require('cors')
 const https   = require('https')
 const crypto  = require('crypto')
 const { pool, dbAll, dbGet, dbRun } = require('./db')
-const { hashPassword, comparePassword, signToken, requireAuth, optionalAuth } = require('./auth')
+const { hashPassword, comparePassword, signToken, requireAuth, optionalAuth, isAdmin } = require('./auth')
 
 const app  = express()
 const PORT = process.env.PORT || 3000
@@ -43,7 +43,7 @@ function handler(fn) {
 
 function publicUser(u) {
   if (!u) return null
-  return { id: u.id, username: u.username, nickname: u.nickname || u.username, avatar: u.avatar || null }
+  return { id: u.id, username: u.username, nickname: u.nickname || u.username, avatar: u.avatar || null, isAdmin: isAdmin(u) }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -245,7 +245,8 @@ app.post('/api/trails', requireAuth, handler(async (req, res) => {
 app.put('/api/trails/:id', requireAuth, handler(async (req, res) => {
   const trail = await dbGet('SELECT id,user_id,source FROM trails WHERE id = ?', [req.params.id])
   if (!trail) return res.status(404).json({ success: false, message: '路线不存在' })
-  if (trail.source !== 'user' || trail.user_id !== req.user.id)
+  const ownsTrail = trail.source === 'user' && trail.user_id === req.user.id
+  if (!ownsTrail && !isAdmin(req.user))
     return res.status(403).json({ success: false, message: '只能编辑自己上传的路线' })
 
   const b = req.body || {}
@@ -299,7 +300,8 @@ app.put('/api/trails/:id', requireAuth, handler(async (req, res) => {
 app.delete('/api/trails/:id', requireAuth, handler(async (req, res) => {
   const trail = await dbGet('SELECT id,user_id,source FROM trails WHERE id = ?', [req.params.id])
   if (!trail) return res.status(404).json({ success: false, message: '路线不存在' })
-  if (trail.source !== 'user' || trail.user_id !== req.user.id)
+  const ownsTrail = trail.source === 'user' && trail.user_id === req.user.id
+  if (!ownsTrail && !isAdmin(req.user))
     return res.status(403).json({ success: false, message: '只能删除自己上传的路线' })
   await dbRun('DELETE FROM trails WHERE id = ?', [req.params.id])
   res.json({ success: true })
