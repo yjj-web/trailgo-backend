@@ -6,6 +6,7 @@ const express = require('express')
 const cors    = require('cors')
 const https   = require('https')
 const crypto  = require('crypto')
+const multer  = require('multer')
 const { pool, dbAll, dbGet, dbRun } = require('./db')
 const { hashPassword, comparePassword, signToken, requireAuth, optionalAuth, isAdmin } = require('./auth')
 
@@ -713,6 +714,38 @@ app.get('/api/geo/staticmap', handler(async (req, res) => {
 }))
 
 // ════════════════════════════════════════════════════════════════════════════
+// 图片上传（直接存数据库，无需外部对象存储）—— 适合中小体量，Render 重启不丢
+// ════════════════════════════════════════════════════════════════════════════
+const memUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } })
+function uploadSingle(req, res, next) {
+  memUpload.single('file')(req, res, (err) => {
+    if (err) return res.status(400).json({ success: false, message: err.message || '上传失败' })
+    next()
+  })
+}
+
+// POST /api/upload —— 表单字段名 file（需登录）。返回 { id, url }
+app.post('/api/upload', requireAuth, uploadSingle, handler(async (req, res) => {
+  if (!req.file || !req.file.buffer) return res.status(400).json({ success: false, message: '未收到图片文件' })
+  const mime = req.file.mimetype || 'image/jpeg'
+  if (!/^image\//.test(mime)) return res.status(400).json({ success: false, message: '仅支持图片文件' })
+  const r = await dbRun('INSERT INTO images (user_id, mime, data) VALUES (?, ?, ?) RETURNING id',
+    [req.user.id, mime, req.file.buffer])
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https'
+  const host  = req.headers['x-forwarded-host'] || req.get('host')
+  res.json({ success: true, id: r.lastID, url: `${proto}://${host}/api/images/${r.lastID}` })
+}))
+
+// GET /api/images/:id —— 读取图片字节（公开）
+app.get('/api/images/:id', handler(async (req, res) => {
+  const row = await dbGet('SELECT mime, data FROM images WHERE id = ?', [req.params.id])
+  if (!row) return res.status(404).end()
+  res.set('Content-Type', row.mime || 'image/jpeg')
+  res.set('Cache-Control', 'public, max-age=2592000')
+  res.send(row.data)
+}))
+
+// ════════════════════════════════════════════════════════════════════════════
 // 对象存储（七牛）—— 前端直传：后端只签发上传凭证，图片字节不经过本服务
 //   需在环境变量配置：QINIU_AK / QINIU_SK / QINIU_BUCKET / QINIU_DOMAIN（公开访问域名，
 //   形如 https://cdn.example.com，不带结尾斜杠）/ QINIU_UP_HOST（可选，默认华东）
@@ -790,6 +823,16 @@ async function ensureSchema() {
       track_id   INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
       created_at TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS'),
       UNIQUE(user_id, track_id)
+    )
+  `)
+  // 图片：直接存库（无需外部对象存储，Render 重启不丢）
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS images (
+      id         SERIAL  PRIMARY KEY,
+      user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      mime       TEXT    NOT NULL DEFAULT 'image/jpeg',
+      data       BYTEA   NOT NULL,
+      created_at TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS')
     )
   `)
 }
