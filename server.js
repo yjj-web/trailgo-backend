@@ -454,29 +454,93 @@ app.delete('/api/records/:id', requireAuth, handler(async (req, res) => {
 // GPS 轨迹 API
 // ════════════════════════════════════════════════════════════════════════════
 
-// GET /api/tracks —— 当前用户的轨迹（需登录）
+// GET /api/tracks —— 当前用户录的轨迹（需登录）
 app.get('/api/tracks', requireAuth, handler(async (req, res) => {
   const rows = await dbAll('SELECT * FROM tracks WHERE user_id = ? ORDER BY date DESC, id DESC', [req.user.id])
   res.json({ success: true, data: rows.map(r => ({ ...r, path: safeJson(r.path, []) })) })
 }))
 
-// POST /api/tracks —— 保存一条轨迹（需登录）
+// GET /api/tracks/public —— 轨迹广场：别人公开的轨迹（可选登录，标记是否已下载）
+app.get('/api/tracks/public', optionalAuth, handler(async (req, res) => {
+  const q = String(req.query.q || '').trim()
+  const params = []
+  let sql = `
+    SELECT tk.id, tk.name, tk.date, tk.distance_km, tk.duration_min, tk.elevation_m, tk.user_id,
+           COALESCE(u.nickname, u.username) AS owner_name
+    FROM tracks tk JOIN users u ON u.id = tk.user_id
+    WHERE tk.is_public = true`
+  if (q) { sql += ' AND tk.name LIKE ?'; params.push(`%${q}%`) }
+  sql += ' ORDER BY tk.date DESC, tk.id DESC LIMIT 100'
+  const rows = await dbAll(sql, params)
+  const savedSet = new Set()
+  if (req.user) {
+    const s = await dbAll('SELECT track_id FROM saved_tracks WHERE user_id = ?', [req.user.id])
+    s.forEach(r => savedSet.add(r.track_id))
+  }
+  res.json({ success: true, data: rows.map(r => ({ ...r, isSaved: savedSet.has(r.id), isMine: req.user && r.user_id === req.user.id })) })
+}))
+
+// GET /api/tracks/saved —— 我下载/收藏的轨迹（需登录）
+app.get('/api/tracks/saved', requireAuth, handler(async (req, res) => {
+  const rows = await dbAll(`
+    SELECT tk.id, tk.name, tk.date, tk.distance_km, tk.duration_min, tk.elevation_m, tk.user_id,
+           COALESCE(u.nickname, u.username) AS owner_name, s.created_at AS saved_at
+    FROM saved_tracks s
+    JOIN tracks tk ON tk.id = s.track_id
+    JOIN users u ON u.id = tk.user_id
+    WHERE s.user_id = ?
+    ORDER BY s.created_at DESC
+  `, [req.user.id])
+  res.json({ success: true, data: rows.map(r => ({ ...r, isSaved: true })) })
+}))
+
+// POST /api/tracks —— 保存一条自己录的轨迹（需登录）
 app.post('/api/tracks', requireAuth, handler(async (req, res) => {
   const b = req.body || {}
   const num = (v, d = 0) => (v === '' || v == null || isNaN(Number(v)) ? d : Number(v))
   const path = Array.isArray(b.path) ? b.path : []
   if (!b.date) return res.status(400).json({ success: false, message: '缺少日期' })
   const result = await dbRun(
-    `INSERT INTO tracks (user_id, name, date, distance_km, duration_min, elevation_m, path)
-     VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    `INSERT INTO tracks (user_id, name, date, distance_km, duration_min, elevation_m, path, is_public)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     [req.user.id, String(b.name || '徒步轨迹').slice(0, 40), b.date,
      num(b.distance_km), Math.round(num(b.duration_min)), Math.round(num(b.elevation_m)),
-     JSON.stringify(path)]
+     JSON.stringify(path), b.is_public === false ? false : true]
   )
   res.json({ success: true, id: result.lastID })
 }))
 
-// DELETE /api/tracks/:id（需登录，仅能删自己的）
+// GET /api/tracks/:id —— 轨迹详情（含完整路径点），可选登录标记是否已下载
+app.get('/api/tracks/:id', optionalAuth, handler(async (req, res) => {
+  const row = await dbGet(`
+    SELECT tk.*, COALESCE(u.nickname, u.username) AS owner_name
+    FROM tracks tk JOIN users u ON u.id = tk.user_id WHERE tk.id = ?
+  `, [req.params.id])
+  if (!row) return res.status(404).json({ success: false, message: '轨迹不存在' })
+  let isSaved = false
+  if (req.user) {
+    const s = await dbGet('SELECT id FROM saved_tracks WHERE user_id = ? AND track_id = ?', [req.user.id, row.id])
+    isSaved = !!s
+  }
+  res.json({ success: true, data: { ...row, path: safeJson(row.path, []), isSaved, isMine: req.user && row.user_id === req.user.id } })
+}))
+
+// POST /api/tracks/:id/save —— 下载/取消下载（toggle，需登录）
+app.post('/api/tracks/:id/save', requireAuth, handler(async (req, res) => {
+  const trackId = Number(req.params.id)
+  const tk = await dbGet('SELECT id FROM tracks WHERE id = ?', [trackId])
+  if (!tk) return res.status(404).json({ success: false, message: '轨迹不存在' })
+  const exists = await dbGet('SELECT id FROM saved_tracks WHERE user_id = ? AND track_id = ?', [req.user.id, trackId])
+  if (exists) {
+    await dbRun('DELETE FROM saved_tracks WHERE user_id = ? AND track_id = ?', [req.user.id, trackId])
+    res.json({ success: true, isSaved: false })
+  } else {
+    await dbRun('INSERT INTO saved_tracks (user_id, track_id) VALUES (?, ?)', [req.user.id, trackId])
+    res.json({ success: true, isSaved: true })
+  }
+}))
+
+// DELETE /api/tracks/:id（需登录，仅能删自己录的）
 app.delete('/api/tracks/:id', requireAuth, handler(async (req, res) => {
   await dbRun('DELETE FROM tracks WHERE id = ? AND user_id = ?', [req.params.id, req.user.id])
   res.json({ success: true })
@@ -615,9 +679,16 @@ function pipeImage(url, res, timeout = 15000) {
 
 // GET /api/geo/staticmap?id=  或  ?lat=&lng=  → 高德静态地图图片（登山口标记 + 有轨迹则画线）
 app.get('/api/geo/staticmap', handler(async (req, res) => {
-  let { lat, lng, id } = req.query
+  let { lat, lng, id, track } = req.query
   let pathPts = []
-  if (id) {
+  let marker = true
+  if (track) {
+    const tk = await dbGet('SELECT path FROM tracks WHERE id = ?', [track])
+    if (!tk) return res.status(404).json({ success: false, message: '轨迹不存在' })
+    pathPts = safeJson(tk.path, [])
+    if (pathPts.length) { lng = pathPts[0][0]; lat = pathPts[0][1] }
+    marker = false   // 轨迹只画线，不打单点
+  } else if (id) {
     const t = await dbGet('SELECT lat,lng,path FROM trails WHERE id = ?', [id])
     if (!t) return res.status(404).json({ success: false, message: '路线不存在' })
     lat = t.lat; lng = t.lng; pathPts = safeJson(t.path, [])
@@ -627,9 +698,13 @@ app.get('/api/geo/staticmap', handler(async (req, res) => {
 
   let url = `https://restapi.amap.com/v3/staticmap?key=${AMAP_KEY}`
     + `&location=${lng},${lat}&size=720*360&scale=2`
-    + `&markers=large,0x1D9E75,:${lng},${lat}`
+  if (marker) url += `&markers=large,0x1D9E75,:${lng},${lat}`
   if (Array.isArray(pathPts) && pathPts.length > 1) {
-    const pts = pathPts.map(p => `${p[0]},${p[1]}`).join(';')
+    // 高德静态图 paths 点数有限，超长轨迹做抽稀，最多约 100 点
+    const step = Math.ceil(pathPts.length / 100)
+    const sampled = pathPts.filter((_, i) => i % step === 0)
+    if (sampled[sampled.length - 1] !== pathPts[pathPts.length - 1]) sampled.push(pathPts[pathPts.length - 1])
+    const pts = sampled.map(p => `${p[0]},${p[1]}`).join(';')
     url += `&paths=6,0x1D9E75,1,,:${pts}`   // 有轨迹：让高德按路线自适应缩放
   } else {
     url += `&zoom=12`
@@ -702,7 +777,19 @@ async function ensureSchema() {
       duration_min INTEGER NOT NULL DEFAULT 0,
       elevation_m  INTEGER NOT NULL DEFAULT 0,
       path         TEXT    NOT NULL DEFAULT '[]',
+      is_public    BOOLEAN NOT NULL DEFAULT true,
       created_at   TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS')
+    )
+  `)
+  await dbRun(`ALTER TABLE tracks ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT true`)
+  // 轨迹下载/收藏关系
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS saved_tracks (
+      id         SERIAL  PRIMARY KEY,
+      user_id    INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+      track_id   INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+      created_at TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS'),
+      UNIQUE(user_id, track_id)
     )
   `)
 }
