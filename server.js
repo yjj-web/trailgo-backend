@@ -458,7 +458,7 @@ app.delete('/api/records/:id', requireAuth, handler(async (req, res) => {
 // GET /api/tracks —— 当前用户录的轨迹（需登录）
 app.get('/api/tracks', requireAuth, handler(async (req, res) => {
   const rows = await dbAll('SELECT * FROM tracks WHERE user_id = ? ORDER BY date DESC, id DESC', [req.user.id])
-  res.json({ success: true, data: rows.map(r => ({ ...r, path: safeJson(r.path, []) })) })
+  res.json({ success: true, data: rows.map(r => ({ ...r, path: safeJson(r.path, []), waypoints: safeJson(r.waypoints, []) })) })
 }))
 
 // GET /api/tracks/public —— 轨迹广场：别人公开的轨迹（可选登录，标记是否已下载）
@@ -500,13 +500,14 @@ app.post('/api/tracks', requireAuth, handler(async (req, res) => {
   const b = req.body || {}
   const num = (v, d = 0) => (v === '' || v == null || isNaN(Number(v)) ? d : Number(v))
   const path = Array.isArray(b.path) ? b.path : []
+  const waypoints = Array.isArray(b.waypoints) ? b.waypoints : []
   if (!b.date) return res.status(400).json({ success: false, message: '缺少日期' })
   const result = await dbRun(
-    `INSERT INTO tracks (user_id, name, date, distance_km, duration_min, elevation_m, path, is_public)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    `INSERT INTO tracks (user_id, name, date, distance_km, duration_min, elevation_m, path, waypoints, is_public)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     [req.user.id, String(b.name || '徒步轨迹').slice(0, 40), b.date,
      num(b.distance_km), Math.round(num(b.duration_min)), Math.round(num(b.elevation_m)),
-     JSON.stringify(path), b.is_public === false ? false : true]
+     JSON.stringify(path), JSON.stringify(waypoints), b.is_public === false ? false : true]
   )
   res.json({ success: true, id: result.lastID })
 }))
@@ -523,7 +524,7 @@ app.get('/api/tracks/:id', optionalAuth, handler(async (req, res) => {
     const s = await dbGet('SELECT id FROM saved_tracks WHERE user_id = ? AND track_id = ?', [req.user.id, row.id])
     isSaved = !!s
   }
-  res.json({ success: true, data: { ...row, path: safeJson(row.path, []), isSaved, isMine: req.user && row.user_id === req.user.id } })
+  res.json({ success: true, data: { ...row, path: safeJson(row.path, []), waypoints: safeJson(row.waypoints, []), isSaved, isMine: req.user && row.user_id === req.user.id } })
 }))
 
 // POST /api/tracks/:id/save —— 下载/取消下载（toggle，需登录）
@@ -810,11 +811,13 @@ async function ensureSchema() {
       duration_min INTEGER NOT NULL DEFAULT 0,
       elevation_m  INTEGER NOT NULL DEFAULT 0,
       path         TEXT    NOT NULL DEFAULT '[]',
+      waypoints    TEXT    NOT NULL DEFAULT '[]',
       is_public    BOOLEAN NOT NULL DEFAULT true,
       created_at   TEXT    DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS')
     )
   `)
   await dbRun(`ALTER TABLE tracks ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT true`)
+  await dbRun(`ALTER TABLE tracks ADD COLUMN IF NOT EXISTS waypoints TEXT NOT NULL DEFAULT '[]'`)
   // 轨迹下载/收藏关系
   await dbRun(`
     CREATE TABLE IF NOT EXISTS saved_tracks (
