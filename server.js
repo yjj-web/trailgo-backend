@@ -787,6 +787,53 @@ app.get('/api/upload/token', requireAuth, handler(async (req, res) => {
   })
 }))
 
+// ── 法律页面（供 App 隐私弹窗链接，无 /api 前缀，直接返回 HTML）──────────────────
+function legalPage(title, bodyHtml) {
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title} · 野径 TrailGo</title>
+<style>body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#1a1a1a;line-height:1.8;max-width:720px;margin:0 auto;padding:24px}
+h1{font-size:22px;color:#0F6E56}h2{font-size:17px;margin-top:24px}p{font-size:15px;color:#333}small{color:#888}</style>
+</head><body><h1>${title}</h1>${bodyHtml}
+<p><small>野径 TrailGo · 更新日期 2026-06</small></p></body></html>`
+}
+
+app.get('/privacy', (req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8')
+  res.send(legalPage('隐私政策', `
+<p>欢迎使用「野径 TrailGo」（以下简称"本应用"）。我们非常重视您的个人信息与隐私保护，本政策说明我们如何收集、使用与保护您的信息。</p>
+<h2>一、我们收集的信息</h2>
+<p>1. <b>位置信息</b>：当您使用"附近路线""轨迹记录""跟随导航"等功能时，我们会在您授权后获取设备的精确定位（GPS/网络定位），用于显示附近徒步路线、记录您的运动轨迹、提供沿轨迹导航。位置信息仅在您主动使用相关功能时获取。</p>
+<p>2. <b>账号信息</b>：您注册时提供的用户名、昵称、头像。</p>
+<p>3. <b>内容信息</b>：您上传的路线、图片、出行记录、评价与轨迹。</p>
+<h2>二、信息的使用</h2>
+<p>用于实现路线浏览、定位与导航、轨迹记录、收藏、评价、个人中心等核心功能；不会用于与上述无关的用途。</p>
+<h2>三、第三方服务</h2>
+<p>本应用使用<b>高德地图（Amap）SDK</b>提供地图展示与定位服务，可能收集设备位置、设备标识等信息，详见高德相应隐私政策。</p>
+<h2>四、信息的存储与保护</h2>
+<p>数据存储于服务器并采取合理的安全措施保护。您可随时删除自己上传的内容与记录。</p>
+<h2>五、您的权利</h2>
+<p>您可在系统设置中关闭定位权限（关闭后定位相关功能将不可用）；可注销账号删除个人数据。</p>
+<h2>六、联系我们</h2>
+<p>如有疑问，请通过应用内反馈与我们联系。</p>`))
+})
+
+app.get('/agreement', (req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8')
+  res.send(legalPage('服务协议', `
+<p>在使用「野径 TrailGo」前，请阅读并同意本服务协议。</p>
+<h2>一、服务内容</h2>
+<p>本应用提供户外徒步路线浏览、天气查询、GPS 轨迹记录与跟随导航、路线收藏与评价、内容上传等功能。</p>
+<h2>二、用户行为规范</h2>
+<p>您应对自己上传的路线、图片、评价等内容负责，不得发布违法、侵权或不实信息。</p>
+<h2>三、户外安全免责</h2>
+<p>本应用提供的路线、轨迹与导航信息<b>仅供参考</b>，实际路况、天气与风险请您自行评估。户外活动存在固有风险，请做好准备并量力而行，因户外活动造成的人身或财产损失，本应用不承担责任。</p>
+<h2>四、账号</h2>
+<p>请妥善保管账号密码，账号下的操作视为您本人行为。</p>
+<h2>五、协议变更</h2>
+<p>我们可能适时更新本协议，更新后继续使用即视为同意。</p>`))
+})
+
 // ── 启动前确保新表存在（幂等，Render 部署无需手动迁移）──────────────────────────
 async function ensureSchema() {
   await dbRun(`
