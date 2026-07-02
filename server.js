@@ -542,6 +542,26 @@ app.post('/api/tracks/:id/save', requireAuth, handler(async (req, res) => {
   }
 }))
 
+// PUT /api/tracks/:id —— 改名 / 切换公开状态（需登录，仅作者）
+app.put('/api/tracks/:id', requireAuth, handler(async (req, res) => {
+  const tk = await dbGet('SELECT id, user_id FROM tracks WHERE id = ?', [req.params.id])
+  if (!tk) return res.status(404).json({ success: false, message: '轨迹不存在' })
+  if (tk.user_id !== req.user.id) return res.status(403).json({ success: false, message: '只能修改自己的轨迹' })
+
+  const b = req.body || {}
+  const fields = [], params = []
+  if (b.name != null) {
+    const name = String(b.name).trim().slice(0, 40)
+    if (!name) return res.status(400).json({ success: false, message: '名称不能为空' })
+    fields.push('name = ?'); params.push(name)
+  }
+  if (b.is_public != null) { fields.push('is_public = ?'); params.push(!!b.is_public) }
+  if (!fields.length) return res.status(400).json({ success: false, message: '没有要更新的内容' })
+  params.push(req.params.id)
+  await dbRun(`UPDATE tracks SET ${fields.join(', ')} WHERE id = ?`, params)
+  res.json({ success: true })
+}))
+
 // DELETE /api/tracks/:id（需登录，仅能删自己录的）
 app.delete('/api/tracks/:id', requireAuth, handler(async (req, res) => {
   await dbRun('DELETE FROM tracks WHERE id = ? AND user_id = ?', [req.params.id, req.user.id])
