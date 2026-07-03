@@ -628,17 +628,168 @@ async function fetchJsonWithRetry(url, retries = 3) {
   throw lastErr
 }
 
+// GET /api/geo/elevation?lat=&lng= —— 地形海拔（Open-Meteo 数字高程，比 GPS 高程稳定）
+app.get('/api/geo/elevation', handler(async (req, res) => {
+  const { lat, lng } = req.query
+  if (lat == null || lng == null) return res.status(400).json({ success: false, message: '缺少 lat/lng' })
+  const url = `https://api.open-meteo.com/v1/elevation?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lng)}`
+  const data = await fetchJsonWithRetry(url)
+  const elevation = Array.isArray(data.elevation) ? Number(data.elevation[0]) : null
+  res.json({ success: true, data: { elevation: Number.isFinite(elevation) ? Math.round(elevation) : null } })
+}))
+
 // GET /api/weather?lat=39.967&lng=115.477
 app.get('/api/weather', handler(async (req, res) => {
   const lat = req.query.lat || '39.967'
   const lng = req.query.lng || '115.477'
   const url = 'https://api.open-meteo.com/v1/forecast'
     + `?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lng)}`
-    + '&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weathercode'
-    + '&daily=weathercode,temperature_2m_max,temperature_2m_min'
-    + '&forecast_days=3&timezone=Asia%2FShanghai'
+    + '&current=temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,precipitation,weather_code,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility'
+    + '&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,pressure_msl,visibility,wind_speed_10m,wind_direction_10m,wind_gusts_10m'
+    + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,sunrise,sunset,uv_index_max'
+    + '&forecast_days=7&timezone=auto'
   const data = await fetchJsonWithRetry(url)
   res.json({ success: true, data })
+}))
+
+const WEATHER_ROUTE_MODELS = {
+  best_match:        { param: 'best_match',        label: '智能最佳' },
+  cma_grapes_global: { param: 'cma_grapes_global', label: 'CMA 中国' },
+  gfs_seamless:      { param: 'gfs_seamless',      label: 'GFS 全球' },
+  ecmwf_ifs025:      { param: 'ecmwf_ifs025',      label: 'ECMWF' },
+  icon_seamless:     { param: 'icon_seamless',     label: 'ICON' },
+}
+
+function routeWeatherAt(block, key, i, fallback = null) {
+  const arr = block && block[key]
+  return Array.isArray(arr) ? arr[i] : fallback
+}
+
+function numOrNull(v) {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+function windDirText(deg) {
+  const n = Number(deg)
+  if (!Number.isFinite(n)) return ''
+  const dirs = ['北风', '东北风', '东风', '东南风', '南风', '西南风', '西风', '西北风']
+  return dirs[Math.round((((n % 360) + 360) % 360) / 45) % 8]
+}
+
+function normaliseRouteWeatherPoint(row, point, index) {
+  const hourly = row.hourly || {}
+  const nowMs = Date.now()
+  const times = hourly.time || []
+  let hourIndex = times.findIndex(t => {
+    const ms = new Date(t).getTime()
+    return Number.isFinite(ms) && ms >= nowMs - 60 * 60 * 1000
+  })
+  if (hourIndex < 0) hourIndex = 0
+  const next24 = times.slice(hourIndex, hourIndex + 24).map((time, offset) => {
+    const i = hourIndex + offset
+    const windDir = routeWeatherAt(hourly, 'wind_direction_10m', i, null)
+    const visibilityM = routeWeatherAt(hourly, 'visibility', i, null)
+    return {
+      time,
+      temp:        numOrNull(routeWeatherAt(hourly, 'temperature_2m', i, null)),
+      feels:       numOrNull(routeWeatherAt(hourly, 'apparent_temperature', i, null)),
+      humidity:    numOrNull(routeWeatherAt(hourly, 'relative_humidity_2m', i, null)),
+      dew:         numOrNull(routeWeatherAt(hourly, 'dew_point_2m', i, null)),
+      pop:         numOrNull(routeWeatherAt(hourly, 'precipitation_probability', i, null)),
+      precip:      numOrNull(routeWeatherAt(hourly, 'precipitation', i, null)),
+      code:        numOrNull(routeWeatherAt(hourly, 'weather_code', i, null)),
+      cloud:       numOrNull(routeWeatherAt(hourly, 'cloud_cover', i, null)),
+      cloudLow:    numOrNull(routeWeatherAt(hourly, 'cloud_cover_low', i, null)),
+      cloudMid:    numOrNull(routeWeatherAt(hourly, 'cloud_cover_mid', i, null)),
+      cloudHigh:   numOrNull(routeWeatherAt(hourly, 'cloud_cover_high', i, null)),
+      pressure:    numOrNull(routeWeatherAt(hourly, 'pressure_msl', i, null)),
+      visibility:  visibilityM == null ? null : Math.round(Number(visibilityM) / 100) / 10,
+      wind:        numOrNull(routeWeatherAt(hourly, 'wind_speed_10m', i, null)),
+      windDir,
+      windDirText: windDirText(windDir),
+      gust:        numOrNull(routeWeatherAt(hourly, 'wind_gusts_10m', i, null)),
+    }
+  })
+  const first = next24[0] || {}
+  const nums = key => next24.map(h => Number(h[key])).filter(Number.isFinite)
+  const max = key => {
+    const a = nums(key)
+    return a.length ? Math.max(...a) : null
+  }
+  const min = key => {
+    const a = nums(key)
+    return a.length ? Math.min(...a) : null
+  }
+  const sum = key => nums(key).reduce((s, v) => s + v, 0)
+  return {
+    id: point.id || index + 1,
+    index: Number(point.index || 0),
+    km: numOrNull(point.km),
+    lat: Number(point.lat),
+    lng: Number(point.lng),
+    alt: numOrNull(point.alt),
+    modelElevation: numOrNull(row.elevation),
+    current: first,
+    next24,
+    summary: {
+      tempMin: min('temp'),
+      tempMax: max('temp'),
+      popMax: max('pop'),
+      precipSum: Math.round(sum('precip') * 10) / 10,
+      windMax: max('wind'),
+      gustMax: max('gust'),
+      cloudMax: max('cloud'),
+      cloudLowMax: max('cloudLow'),
+      visibilityMin: min('visibility'),
+    },
+  }
+}
+
+// POST /api/weather/route
+// body: { points:[{lat,lng,alt,index,km}], model:'best_match', forecastHours:24 }
+app.post('/api/weather/route', handler(async (req, res) => {
+  const body = req.body || {}
+  const rawPoints = Array.isArray(body.points) ? body.points : []
+  const points = rawPoints
+    .map((p, i) => ({
+      id: p.id || i + 1,
+      index: Number(p.index || 0),
+      km: numOrNull(p.km),
+      lat: Number(p.lat),
+      lng: Number(p.lng),
+      alt: numOrNull(p.alt),
+    }))
+    .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng))
+    .slice(0, 12)
+  if (!points.length) return res.status(400).json({ success: false, message: '缺少有效轨迹点' })
+
+  const modelKey = WEATHER_ROUTE_MODELS[body.model] ? body.model : 'best_match'
+  const model = WEATHER_ROUTE_MODELS[modelKey]
+  const forecastHours = Math.min(48, Math.max(6, Math.round(Number(body.forecastHours || 24))))
+  const lats = points.map(p => p.lat.toFixed(5)).join(',')
+  const lngs = points.map(p => p.lng.toFixed(5)).join(',')
+  const hasAllElevation = points.every(p => Number.isFinite(p.alt) && p.alt > 0)
+  const elevation = hasAllElevation
+    ? '&elevation=' + points.map(p => Math.round(p.alt)).join(',')
+    : ''
+  const url = 'https://api.open-meteo.com/v1/forecast'
+    + `?latitude=${encodeURIComponent(lats)}&longitude=${encodeURIComponent(lngs)}`
+    + elevation
+    + '&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,pressure_msl,visibility,wind_speed_10m,wind_direction_10m,wind_gusts_10m'
+    + `&forecast_hours=${forecastHours}&timezone=auto&models=${encodeURIComponent(model.param)}`
+  const upstream = await fetchJsonWithRetry(url)
+  const rows = Array.isArray(upstream) ? upstream : [upstream]
+  res.json({
+    success: true,
+    data: {
+      model: modelKey,
+      modelParam: model.param,
+      modelLabel: model.label,
+      generatedAt: new Date().toISOString(),
+      points: rows.map((row, i) => normaliseRouteWeatherPoint(row, points[i] || points[0], i)),
+    },
+  })
 }))
 
 // ════════════════════════════════════════════════════════════════════════════
